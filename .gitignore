@@ -1,0 +1,9 @@
+.state/
+__pycache__/
+*.pyc
+.env
+config.json
+.obsidian/
+00_收件箱/抖音视频待处理.jsonl
+00_账号候选/抖音账号候选.jsonl
+00_账号候选/已确认账号.txt

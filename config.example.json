@@ -1,0 +1,51 @@
+{
+  "vault_root": ".",
+  "inbox_jsonl": "00_收件箱/抖音视频待处理.jsonl",
+  "state_file": ".state/processed.json",
+  "llm": {
+    "api_key_env": "OPENAI_API_KEY",
+    "base_url_env": "OPENAI_BASE_URL",
+    "model_env": "OPENAI_MODEL",
+    "default_base_url": "https://api.openai.com/v1",
+    "default_model": "gpt-4.1-mini"
+  },
+  "douyin_web": {
+    "profile_dir": ".state/douyin-web-profile",
+    "target_url": "https://www.douyin.com/user/self?showTab=like",
+    "scroll_rounds": 12,
+    "headless": false,
+    "channel": "chrome",
+    "account_queries": [
+      "北京炒家",
+      "涅槃重升",
+      "退学炒股",
+      "炒股养家",
+      "作手新一"
+    ],
+    "account_urls": [],
+    "content_keywords": [
+      "股票",
+      "游资",
+      "A股",
+      "短线",
+      "龙头",
+      "题材",
+      "情绪",
+      "涨停",
+      "打板",
+      "低吸",
+      "半路",
+      "竞价",
+      "盘口",
+      "板块",
+      "主线",
+      "资金",
+      "仓位",
+      "风控"
+    ]
+  },
+  "review": {
+    "timezone": "Asia/Shanghai",
+    "daily_review_days": 1
+  }
+}
