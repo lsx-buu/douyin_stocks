@@ -17,6 +17,7 @@ from .teach import teach_douyin_ai
 from .transcript import (
     fetch_douyin_ai_from_current_page,
     fetch_transcripts_for_top_cards,
+    mine_douyin_author_current_playlist,
     mine_douyin_author_works,
     mine_douyin_search_with_review,
     review_then_fetch_douyin_ai_current_page,
@@ -132,6 +133,19 @@ def build_parser() -> argparse.ArgumentParser:
     mine_author_parser.add_argument("--manual-seconds", type=int, default=0, help="Wait on author page for captcha/login/manual help")
     mine_author_parser.add_argument("--prompt", default="请给我完整的对白文本")
     mine_author_parser.add_argument("--no-skip-existing", action="store_true")
+
+    mine_author_current_parser = subparsers.add_parser(
+        "mine-douyin-author-current",
+        help="Wait for manual positioning in an author playlist, then ask Douyin AI from the current video onward",
+    )
+    mine_author_current_parser.add_argument("--config", default="config.json", help="Path to config JSON")
+    mine_author_current_parser.add_argument("--url", required=True, help="Douyin author homepage URL")
+    mine_author_current_parser.add_argument("--limit", type=int, default=80)
+    mine_author_current_parser.add_argument("--start-index", type=int, default=1)
+    mine_author_current_parser.add_argument("--manual-seconds", type=int, default=240)
+    mine_author_current_parser.add_argument("--manual-confirm", action="store_true")
+    mine_author_current_parser.add_argument("--prompt", default="请给我完整的对白文本")
+    mine_author_current_parser.add_argument("--no-skip-existing", action="store_true")
 
     teach_parser = subparsers.add_parser(
         "teach-douyin-ai",
@@ -288,6 +302,22 @@ def main() -> None:
                 scroll_rounds=args.scroll_rounds,
                 limit=args.limit,
                 manual_seconds=args.manual_seconds,
+                ai_prompt=args.prompt,
+                skip_existing=not args.no_skip_existing,
+            )
+        )
+        return
+
+    if args.command == "mine-douyin-author-current":
+        config = load_config(Path(args.config))
+        print(
+            mine_douyin_author_current_playlist(
+                config,
+                url=args.url,
+                limit=args.limit,
+                manual_seconds=args.manual_seconds,
+                manual_confirm=args.manual_confirm,
+                start_index=args.start_index,
                 ai_prompt=args.prompt,
                 skip_existing=not args.no_skip_existing,
             )

@@ -914,6 +914,16 @@ def _author_home_url(url: str) -> str:
     return url
 
 
+def _author_modal_url(author_url: str, detail_url: str) -> str:
+    canonical = _canonical_detail_url(detail_url)
+    match = re.search(r"/video/(\d+)", canonical or "")
+    if not match:
+        return ""
+    home = _author_home_url(author_url)
+    separator = "&" if "?" in home else "?"
+    return f"{home}{separator}modal_id={match.group(1)}"
+
+
 def _extract_author_item_ai_with_retries(
     page: Any,
     *,
@@ -1293,6 +1303,191 @@ def _mine_author_manual_playlist_flow(
     return result
 
 
+def mine_douyin_author_current_playlist(
+    config: AppConfig,
+    *,
+    url: str,
+    limit: int = 80,
+    manual_seconds: int = 240,
+    manual_confirm: bool = False,
+    start_index: int = 1,
+    ai_prompt: str = "请给我完整的对白文本",
+    skip_existing: bool = True,
+) -> str:
+    ai_prompt = _clean_douyin_ai_prompt(ai_prompt)
+    sync_playwright = _load_playwright()
+    state_dir = config.root / ".state"
+    debug_dir = state_dir / "debug"
+    works_md = state_dir / "current_douyin_author_works.md"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    existing_urls = _existing_mined_source_urls(config.root) if skip_existing else set()
+    result: dict[str, Any] = {
+        "fetched": 0,
+        "missing": 0,
+        "skipped": 0,
+        "outputs": [],
+        "failed_step": "",
+    }
+
+    with sync_playwright() as playwright:
+        context = _launch_context(playwright, config, headless=False)
+        page = context.pages[0] if context.pages else context.new_page()
+        try:
+            page.set_viewport_size(dict(DOUYIN_VIEWPORT))
+        except Exception:
+            pass
+
+        author_url = _author_home_url(url)
+        try:
+            page.goto(author_url, wait_until="domcontentloaded", timeout=60000)
+            page.wait_for_timeout(7000)
+        except Exception as exc:
+            result["failed_step"] = f"open_author_home:{exc.__class__.__name__}"
+            _write_author_playlist_start_debug(page, debug_dir, "current_open_author_home")
+            try:
+                context.close()
+            except Exception:
+                pass
+            return _format_author_current_result(result)
+
+        if manual_confirm:
+            print(
+                "manual_confirm=press_enter_after_positioning_author_grid_or_video",
+                flush=True,
+            )
+            try:
+                input()
+            except EOFError:
+                if manual_seconds > 0:
+                    page.wait_for_timeout(manual_seconds * 1000)
+        elif manual_seconds > 0:
+            print(
+                "manual_position="
+                f"{manual_seconds}s open_work_comment_ta_works_and_select_start_video",
+                flush=True,
+            )
+            page.wait_for_timeout(manual_seconds * 1000)
+
+        _dismiss_douyin_soft_overlays(page)
+        author_info = _author_profile_info(page, author_url)
+        works_md.write_text(_author_works_markdown(author_info, []), encoding="utf-8")
+
+        if not _manual_video_controls_visible(page):
+            print("manual_position=profile_grid try_click_visible_unmined_card", flush=True)
+            if not _click_visible_unmined_author_card(page, existing_urls, author_url=author_url):
+                result["failed_step"] = "manual_position_not_video_modal"
+                _write_author_playlist_start_debug(page, debug_dir, "current_not_video_modal")
+                try:
+                    context.close()
+                except Exception:
+                    pass
+                return _format_author_current_result(result)
+        if not _click_comment_button_manual(page):
+            result["failed_step"] = "manual_position_no_comment_panel"
+            _write_author_playlist_start_debug(page, debug_dir, "current_no_comment_panel")
+            try:
+                context.close()
+            except Exception:
+                pass
+            return _format_author_current_result(result)
+        if not _click_author_side_works_tab(page):
+            result["failed_step"] = "manual_position_no_ta_works"
+            _write_author_playlist_start_debug(page, debug_dir, "current_no_ta_works")
+            try:
+                context.close()
+            except Exception:
+                pass
+            return _format_author_current_result(result)
+
+        total = max(limit, 0)
+        print(
+            f"author_current_start author={author_info.get('name', '')} start_index={start_index} limit={total}",
+            flush=True,
+        )
+        seen: set[str] = set()
+        for offset in range(total):
+            index = max(start_index, 1) + offset
+            _disable_douyin_autoplay(page)
+            page.wait_for_timeout(800)
+            item = _current_author_playlist_item(page, author_info, index)
+            detail_url = _canonical_detail_url(str(item.get("url") or page.url)) or (page.url or "")
+            if detail_url in seen:
+                result["failed_step"] = "repeated_video"
+                break
+            seen.add(detail_url)
+
+            if skip_existing and detail_url in existing_urls:
+                result["skipped"] = int(result["skipped"]) + 1
+                print(f"author_current={index} skipped=existing url={detail_url}", flush=True)
+            else:
+                print(f"author_current={index} ask_ai={detail_url}", flush=True)
+                bundle, item_review_md = _write_author_item_review_bundle(
+                    page,
+                    state_dir=state_dir,
+                    debug_dir=debug_dir,
+                    author_info=author_info,
+                    item=item,
+                    index=index,
+                    attempt=1,
+                )
+                if not _force_open_author_comment_tab(page):
+                    ai_result = {"transcript": "", "status": "未能切到评论页，未判断问AI"}
+                elif not _has_author_ai_entry(page):
+                    ai_result = {"transcript": "", "status": "评论页未发现问AI，跳过当前视频"}
+                else:
+                    ai_result = _extract_author_transcript_via_douyin_ai_simple(page, ai_prompt, item)
+                transcript = str(ai_result.get("transcript") or "").strip()
+                source = str(ai_result.get("status") or "抖音AI未返回可保存内容")
+                prompt_used = str(ai_result.get("prompt") or ai_prompt)
+                if transcript:
+                    target_output = _default_author_output_path(config.root, author_info, item, index)
+                    _write_mined_ai_answer(
+                        target_output,
+                        detail_url=detail_url,
+                        ai_prompt=prompt_used,
+                        source=source,
+                        candidates_md=works_md,
+                        review_md=item_review_md,
+                        picked=item,
+                        bundle=bundle,
+                        transcript=transcript,
+                    )
+                    result["outputs"].append(str(target_output))
+                    existing_urls.add(detail_url)
+                    result["fetched"] = int(result["fetched"]) + 1
+                    print(f"author_current={index} saved={target_output} chars={len(transcript)}", flush=True)
+                else:
+                    result["missing"] = int(result["missing"]) + 1
+                    print(f"author_current={index} missing source={source}", flush=True)
+
+            if offset >= total - 1:
+                break
+            if not _click_author_side_works_tab(page):
+                result["failed_step"] = "return_to_ta_works"
+                _write_author_playlist_start_debug(page, debug_dir, "current_return_to_ta_works")
+                break
+            if not _advance_author_playlist_video(page, detail_url):
+                result["failed_step"] = "advance_next_video"
+                break
+
+        try:
+            context.close()
+        except Exception:
+            pass
+    return _format_author_current_result(result)
+
+
+def _format_author_current_result(result: dict[str, Any]) -> str:
+    return (
+        f"mine_author_current fetched={result.get('fetched', 0)} "
+        f"missing={result.get('missing', 0)} "
+        f"skipped={result.get('skipped', 0)} "
+        f"failed_step={result.get('failed_step', '')} "
+        f"outputs={';'.join(result.get('outputs', []) or [])}"
+    )
+
+
 def _dismiss_douyin_soft_overlays(page: Any) -> None:
     try:
         page.keyboard.press("Escape")
@@ -1361,6 +1556,159 @@ def _click_first_author_card_manual(page: Any) -> bool:
         except Exception:
             pass
         page.wait_for_timeout(1200)
+    return False
+
+
+def _click_visible_unmined_author_card(page: Any, existing_urls: set[str], *, author_url: str) -> bool:
+    script = r"""
+() => {
+  const visible = (node) => {
+    const rect = node.getBoundingClientRect();
+    const style = window.getComputedStyle(node);
+    return rect.width >= 120 &&
+      rect.height >= 160 &&
+      rect.x > 120 &&
+      rect.y > 120 &&
+      rect.y < window.innerHeight - 40 &&
+      style.visibility !== 'hidden' &&
+      style.display !== 'none';
+  };
+  return Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="/note/"]'))
+    .filter(visible)
+    .map((anchor) => {
+      const rect = anchor.getBoundingClientRect();
+      return {
+        x: rect.x + rect.width / 2,
+        y: rect.y + Math.min(rect.height * 0.38, rect.height - 24),
+        href: anchor.href,
+        text: String(anchor.innerText || anchor.textContent || '').replace(/\s+/g, ' ').trim(),
+      };
+    })
+    .sort((a, b) => a.y - b.y || a.x - b.x);
+}
+"""
+    scroll_script = r"""
+() => {
+  const amount = 5200;
+  window.scrollBy(0, amount);
+  if (document.scrollingElement) document.scrollingElement.scrollTop += amount;
+  if (document.documentElement) document.documentElement.scrollTop += amount;
+  if (document.body) document.body.scrollTop += amount;
+  for (const node of Array.from(document.querySelectorAll('div, main, section'))) {
+    try {
+      const rect = node.getBoundingClientRect();
+      const style = window.getComputedStyle(node);
+      const scrollable = node.scrollHeight > node.clientHeight + 300;
+      const visible = rect.width > 300 && rect.height > 300 && style.display !== 'none' && style.visibility !== 'hidden';
+      if (scrollable && visible) node.scrollTop += amount;
+    } catch (_) {}
+  }
+  return {
+    y: window.scrollY || document.documentElement?.scrollTop || document.body?.scrollTop || 0,
+    textLength: String(document.body?.innerText || '').length,
+  };
+}
+"""
+    last_visible: list[dict[str, Any]] = []
+    for attempt in range(90):
+        try:
+            anchors = page.evaluate(script) or []
+        except Exception:
+            anchors = []
+        if anchors:
+            last_visible = anchors
+        for anchor in anchors:
+            detail_url = _canonical_detail_url(str(anchor.get("href") or ""))
+            if detail_url and detail_url not in existing_urls:
+                try:
+                    print(
+                        f"author_grid_pick attempt={attempt + 1} url={detail_url} text={str(anchor.get('text') or '')[:80]}",
+                        flush=True,
+                    )
+                    if _open_author_card_from_grid(page, detail_url):
+                        return True
+                    modal_url = _author_modal_url(author_url, detail_url)
+                    if modal_url:
+                        page.goto(modal_url, wait_until="domcontentloaded", timeout=60000)
+                    else:
+                        page.mouse.click(float(anchor["x"]), float(anchor["y"]))
+                    page.wait_for_timeout(6500)
+                    return _manual_video_controls_visible(page)
+                except Exception:
+                    return False
+        try:
+            scroll_info = page.evaluate(scroll_script) or {}
+            print(f"author_grid_scroll attempt={attempt + 1} y={scroll_info.get('y', '')}", flush=True)
+        except Exception:
+            try:
+                page.mouse.wheel(0, 5200)
+            except Exception:
+                pass
+        page.wait_for_timeout(900)
+
+    if not existing_urls and last_visible:
+        try:
+            anchor = last_visible[0]
+            page.mouse.click(float(anchor["x"]), float(anchor["y"]))
+            page.wait_for_timeout(6500)
+            return _manual_video_controls_visible(page)
+        except Exception:
+            return False
+    return False
+
+
+def _open_author_card_from_grid(page: Any, detail_url: str) -> bool:
+    match = re.search(r"/video/(\d+)", _canonical_detail_url(detail_url) or "")
+    if not match:
+        return False
+    video_id = match.group(1)
+    point_script = r"""
+(videoId) => {
+  const anchors = Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="/note/"]'));
+  const anchor = anchors.find((node) => String(node.href || '').includes(videoId));
+  if (!anchor) return null;
+  anchor.scrollIntoView({ block: 'center', inline: 'center' });
+  const rect = anchor.getBoundingClientRect();
+  return {
+    x: rect.x + rect.width / 2,
+    y: rect.y + Math.min(rect.height * 0.38, rect.height - 24),
+  };
+}
+"""
+    click_script = r"""
+(videoId) => {
+  const anchors = Array.from(document.querySelectorAll('a[href*="/video/"], a[href*="/note/"]'));
+  const anchor = anchors.find((node) => String(node.href || '').includes(videoId));
+  if (!anchor) return false;
+  anchor.scrollIntoView({ block: 'center', inline: 'center' });
+  const rect = anchor.getBoundingClientRect();
+  const target = document.elementFromPoint(rect.x + rect.width / 2, rect.y + Math.min(rect.height * 0.38, rect.height - 24)) || anchor;
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click']) {
+    target.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+  }
+  return true;
+}
+"""
+    try:
+        point = page.evaluate(point_script, video_id)
+    except Exception:
+        point = None
+    if point:
+        try:
+            page.wait_for_timeout(500)
+            page.mouse.click(float(point["x"]), float(point["y"]))
+            page.wait_for_timeout(6500)
+            if _manual_video_controls_visible(page):
+                return True
+        except Exception:
+            pass
+    try:
+        clicked = bool(page.evaluate(click_script, video_id))
+    except Exception:
+        clicked = False
+    if clicked:
+        page.wait_for_timeout(6500)
+        return _manual_video_controls_visible(page)
     return False
 
 
