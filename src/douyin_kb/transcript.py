@@ -1241,6 +1241,11 @@ def _mine_author_manual_playlist_flow(
         _disable_douyin_autoplay(page)
         page.wait_for_timeout(800)
         item = _current_author_playlist_item(page, author_info, index)
+        other_author = _playlist_item_other_author(item, author_info)
+        if other_author:
+            result["failed_step"] = f"left_author_playlist:{other_author}"
+            print(f"author_manual={index}/{total} stop=left_author_playlist other_author={other_author}", flush=True)
+            break
         detail_url = _canonical_detail_url(str(item.get("url") or page.url)) or (page.url or "")
         if detail_url in seen:
             result["failed_step"] = "repeated_video"
@@ -1411,6 +1416,11 @@ def mine_douyin_author_current_playlist(
             _disable_douyin_autoplay(page)
             page.wait_for_timeout(800)
             item = _current_author_playlist_item(page, author_info, index)
+            other_author = _playlist_item_other_author(item, author_info)
+            if other_author:
+                result["failed_step"] = f"left_author_playlist:{other_author}"
+                print(f"author_current={index} stop=left_author_playlist other_author={other_author}", flush=True)
+                break
             detail_url = _canonical_detail_url(str(item.get("url") or page.url)) or (page.url or "")
             if detail_url in seen:
                 result["failed_step"] = "repeated_video"
@@ -1806,6 +1816,11 @@ def _mine_author_playlist_from_page(
         _disable_douyin_autoplay(page)
         page.wait_for_timeout(1200)
         item = _current_author_playlist_item(page, author_info, index)
+        other_author = _playlist_item_other_author(item, author_info)
+        if other_author:
+            result["failed_step"] = f"left_author_playlist:{other_author}"
+            print(f"author_playlist={index}/{total} stop=left_author_playlist other_author={other_author}", flush=True)
+            break
         detail_url = _canonical_detail_url(str(item.get("url") or page.url))
         if not detail_url:
             detail_url = page.url or ""
@@ -2177,6 +2192,26 @@ def _current_author_playlist_item(page: Any, author_info: dict[str, str], index:
         "stats": str(value.get("stats") or ""),
         "source_id": f"douyin:video:{video_id}" if video_id else f"douyin:author_playlist:{index}",
     }
+
+
+def _playlist_item_other_author(item: dict[str, Any], author_info: dict[str, str]) -> str:
+    expected = _normalize(str(author_info.get("name") or ""))
+    if not expected:
+        return ""
+    raw_text = str(item.get("raw_text") or item.get("text") or "")
+    for match in re.finditer(r"@\s*([^\s@，,。·|｜#]{2,30})", raw_text):
+        name = match.group(1).strip()
+        normalized = _normalize(name)
+        if not normalized:
+            continue
+        if "." in name or "douyin" in normalized or "bytedance" in normalized:
+            continue
+        if any(token in normalized for token in ("私信", "加载", "详情", "下载抖音", "正在播放")):
+            continue
+        if normalized in expected or expected in normalized:
+            continue
+        return name[:40]
+    return ""
 
 
 def _advance_author_playlist_video(page: Any, current_detail_url: str) -> bool:
@@ -2875,15 +2910,28 @@ def _author_profile_info(page: Any, url: str) -> dict[str, str]:
     script = """
 () => {
   const clean = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const invalid = (value) => {
+    const item = clean(value);
+    return !item ||
+      item.length < 2 ||
+      item.length > 40 ||
+      /私信|加载|关注|粉丝|获赞|作品|喜欢|收藏|评论|问AI|相关推荐|下载抖音|正在播放/.test(item);
+  };
   const title = clean(document.title || '');
   const meta = clean(document.querySelector('meta[name="description"]')?.getAttribute('content') || '');
   const text = clean(document.body?.innerText || '');
+  const atMatches = Array.from(text.matchAll(/@\\s*([^\\s@，,。·|｜]{2,24})(?=\\s*(?:\\d|粉丝|获赞|关注|·|路|认证|$))/g))
+    .map((match) => clean(match[1]))
+    .filter((item) => !invalid(item));
   const candidates = Array.from(document.querySelectorAll('h1, h2, [data-e2e*="user"], [class*="name"], [class*="Name"]'))
     .map((node) => clean(node.innerText || node.textContent || ''))
-    .filter((item) => item && item.length >= 2 && item.length <= 40);
-  const name = candidates.find((item) => !/[关注粉丝获赞作品喜欢收藏]/.test(item)) ||
-    title.replace(/[-_｜|].*$/, '').replace(/的抖音.*$/, '').trim() ||
-    meta.replace(/，.*$/, '').trim();
+    .filter((item) => !invalid(item));
+  const titleName = clean(title.replace(/[-_｜|].*$/, '').replace(/的抖音.*$/, ''));
+  const metaName = clean(meta.replace(/，.*$/, ''));
+  const name = atMatches[0] ||
+    candidates[0] ||
+    (!invalid(titleName) ? titleName : '') ||
+    (!invalid(metaName) ? metaName : '');
   return { name, title, meta, page_text: text.slice(0, 1200), url: location.href };
 }
 """
